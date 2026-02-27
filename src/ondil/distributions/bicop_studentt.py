@@ -161,7 +161,7 @@ class BivariateCopulaStudentT(BivariateCopulaMixin, CopulaMixin, Distribution):
         tau = st.kendalltau(y[:, 0], y[:, 1]).correlation
         rho_fixed = np.sin(tau * np.pi / 2.0)
         
-        def negative_log_likelihood(nu):
+        def negative_log_likelihood_nu(nu):
             try:
                 if nu <= 2.0 or nu > 100:  # Reasonable bounds
                     return 1e10
@@ -187,7 +187,7 @@ class BivariateCopulaStudentT(BivariateCopulaMixin, CopulaMixin, Distribution):
         
         # Optimize nu in reasonable range
         result = minimize_scalar(
-            negative_log_likelihood,
+            negative_log_likelihood_nu,
             bounds=(2.1, 30.0),  # Reasonable range for nu
             method='bounded',
             options={'xatol': 1e-6, 'maxiter': 100}
@@ -235,7 +235,7 @@ class BivariateCopulaStudentT(BivariateCopulaMixin, CopulaMixin, Distribution):
             except:
                 continue
         
-        def negative_log_likelihood(params):
+        def negative_log_likelihood_joint(params):
             try:
                 rho, nu = params
                 
@@ -264,7 +264,7 @@ class BivariateCopulaStudentT(BivariateCopulaMixin, CopulaMixin, Distribution):
         
         # Fast joint optimization with relaxed tolerances
         result = minimize(
-            negative_log_likelihood,
+            negative_log_likelihood_joint,
             x0=[rho_init, best_nu_init],
             bounds=[(-0.99, 0.99), (2.01, 100.0)],
             method='L-BFGS-B',
@@ -277,6 +277,48 @@ class BivariateCopulaStudentT(BivariateCopulaMixin, CopulaMixin, Distribution):
         else:
             # Fallback to initial values
             return rho_init, best_nu_init
+
+    def df_iteration(self, y: np.ndarray, rho_values: np.ndarray) -> float:
+        """
+        Optimize Student-t degrees of freedom with observation-specific rho values.
+
+        Equivalent to R GAMCopula-style optimization over log(nu - 2)
+        with bounds ``log(2)`` to ``log(30)`` and link
+        ``nu = 2 + 1e-8 + exp(nu_log)``.
+        """
+        from scipy.optimize import minimize_scalar
+
+        def link_function(nu_log):
+            return 2 + 1e-8 + np.exp(nu_log)
+
+        def negative_log_likelihood_df_iteration(nu_log, y_data, rho_vals):
+            if link_function(nu_log) == np.inf:
+                nu_log = np.log(30)
+
+            nu = link_function(nu_log)
+            theta_dict = {
+                0: rho_vals.reshape(-1, 1),
+                1: np.full((len(y_data), 1), nu),
+            }
+
+            try:
+                log_pdf = self.logpdf(y_data, theta_dict)
+                nll = -np.sum(log_pdf)
+                if not np.isfinite(nll):
+                    return 1e10
+                return nll
+            except Exception:
+                return 1e10
+
+        result = minimize_scalar(
+            negative_log_likelihood_df_iteration,
+            bounds=(np.log(2), np.log(30)),
+            method='bounded',
+            args=(y, rho_values),
+        )
+
+        optimal_nu_log = result.x
+        return link_function(optimal_nu_log)
 
     def cdf(self, y, theta):
         raise NotImplementedError("Not implemented")
@@ -432,62 +474,6 @@ class BivariateCopulaStudentT(BivariateCopulaMixin, CopulaMixin, Distribution):
     def get_regularization_size(self, dim: int) -> int:
         return dim
 
-    def r_style_nu_optimization(self, y, initial_rho=None):
-        """
-        R-style degrees of freedom optimization matching BiCopEst behavior.
-        
-        This implements the exact same optimization step that R does:
-        1. Fix rho parameter (use initial_rho or get from joint MLE)
-        2. Optimize only nu using optimize() over log(2) to log(30)
-        3. Use link function: 2 + 1e-08 + exp(nu)
-        
-        Args:
-            y: Bivariate data in [0,1]^2
-            initial_rho: Fixed rho value (if None, gets from joint MLE)
-            
-        Returns:
-            tuple: (optimized_rho, optimized_nu_log, optimized_nu_actual)
-        """
-        from scipy.optimize import minimize_scalar
-        
-        # Get initial rho if not provided
-        if initial_rho is None:
-            joint_vals = self.joint_mle_estimation(y)
-            initial_rho = joint_vals[0]
-        
-        def link_function(nu_log):
-            """R's link function: 2 + 1e-08 + exp(nu)"""
-            return 2.0 + 1e-8 + np.exp(nu_log)
-        
-        def negative_log_likelihood(nu_log):
-            """Negative log-likelihood for nu optimization (matching R's nllvec)"""
-            nu = link_function(nu_log)
-            
-            # Handle extreme values like R does
-            if nu == np.inf or nu > 30:
-                nu_log = np.log(30.0)
-                nu = link_function(nu_log)
-            
-            try:
-                # Use our existing log-likelihood function
-                loglik = _log_likelihood_t(y, initial_rho, nu)
-                return -np.sum(loglik)
-            except:
-                return 1e10  # Return large value for numerical issues
-        
-        # Optimize nu using R's approach: optimize over log(2) to log(30)
-        result = minimize_scalar(
-            negative_log_likelihood,
-            bounds=(np.log(2.0), np.log(30.0)),
-            method='bounded',
-            options={'xatol': 1e-8, 'maxiter': 100}
-        )
-        
-        optimized_nu_log = result.x
-        optimized_nu = link_function(optimized_nu_log)
-        
-        return initial_rho, optimized_nu_log, optimized_nu
-
 
 ##########################################################
 ### Functions for the Student-t copula derivatives #####
@@ -584,7 +570,7 @@ def _log_likelihood_t(y, rho, nu):
     #     * (1 + (t1^2 + t2^2 - 2*rho*t1*t2)/(nu*(1-rho^2)))^(-(nu+2)/2)
 
     # Calculate the gamma ratio using stable division
-    gamma_ratio = stable_gamma_division((nu + 2.0) / 2.0, nu / 2.0)
+    gamma_ratio = nu / 2
 
     # OPTIMIZED: Vectorized t distribution PDFs (major speedup)
     dt1 = st.t.pdf(t1.flatten(), df=nu_flat).reshape(-1, 1)
