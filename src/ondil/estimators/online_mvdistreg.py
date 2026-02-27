@@ -1384,18 +1384,11 @@ class MultivariateOnlineDistributionalRegressionPath(
                             k=k,
                         )
                 
-                # DF Iteration for T-copula: optimize nu only when nu is intercept-only
-                eq_p = self._equation.get(p, {})
-                nu_intercept_only = (
-                    len(eq_p) == 1
-                    and isinstance(next(iter(eq_p.values())), str)
-                    and next(iter(eq_p.values())) == "intercept"
-                )
+                # DF Iteration for T-copula: always optimize nu (including covariate-based nu)
                 if (
                     isinstance(self.distribution, BivariateCopulaStudentT)
                     and p == 1
                     and inner_iteration == 0
-                    and nu_intercept_only
                 ):
                     if self.verbose >= 1:
                         print(f"DF iteration {inner_iteration + 1}")
