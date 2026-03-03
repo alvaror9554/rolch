@@ -1315,13 +1315,10 @@ def diff_t_nu_nu(x, nu):
     t2 = 0.5 * nu_eff  # nu/2
     t4 = 0.5 * (nu_eff + 1.0)  # (nu+1)/2
 
-    # Compute Ipp from inbeder (scalar routine) only where needed
-    Ipp = np.empty_like(x_b, dtype=float)
-    flat_xmax = np.ravel(xmax)
-    flat_t2 = np.ravel(t2)
-    flat_Ipp = np.empty_like(flat_xmax, dtype=float)
+    # Compute Ipp from inbeder.
+    # Important: use returned values directly (VineCopula C does this);
+    # writing from an uninitialized temp buffer makes derivatives non-deterministic.
     _, _, Ipp = inbeder_vec_numba(xmax, t2, 0.5)
-    Ipp[...] = flat_Ipp.reshape(x_b.shape)
 
     # Remaining terms (vectorized)
     t5 = np.power(nu_eff, (nu_eff / 2.0) - 1.0) * abs_x
@@ -1431,13 +1428,10 @@ def _diff_quantile_nu(x, nu):
 
     xmax = nu_eff / (nu_eff + abs_x * abs_x)
 
-    # Compute dI/dp via inbeder for masked positions
-    idxs = np.flatnonzero(mask)
-    dIdp_vals = np.empty(idxs.size, dtype=float)
+    # Compute dI/dp via inbeder.
+    # Important: keep full returned array; previous masked-temp assignment used
+    # uninitialized memory and produced unstable/NaN updates in later iterations.
     _, dIdp, _ = inbeder_vec_numba(xmax, t2, 0.5)
-
-    dIdp = np.zeros_like(x_b, dtype=float)
-    dIdp.flat[idxs] = dIdp_vals
 
     # Final result
     res = 0.5 / t_pdf * (0.5 * dIdp + (t5 * t6) / t7)
